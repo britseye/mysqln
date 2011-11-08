@@ -1,4 +1,60 @@
-module connect;
+/**
+ * A native D driver for the MySQL database system. Source file mysql.d.
+ *
+ * This module attempts to provide composite objects and methods that will allow a wide range of common database
+ * operations, but be relatively easy to use. The design is a first attempt to illustrate the structure of a set of modules
+ * to cover popular database systems and ODBC.
+ *
+ * It has no dependecies on GPL header files or libraries, instead communicating directly with the server via the
+ * published client/server protocol.
+ *
+ * $(LINK http://forge.mysql.com/wiki/MySQL_Internals_ClientServer_Protocol)$(BR)
+ * $(LINK http://forge.mysql.com/w/index.php?title=MySQL_Internals_ClientServer_Protocol&diff=5078&oldid=4374)
+ *
+ * This version is not by any means comprehensive, and there is still a good deal of work to do. As a general design
+ * position it avoids providing wrappers for operations that can be accomplished by simple SQL sommands, unless
+ * the command produces a result set. There are some instances of the latter category to provide simple meta-data
+ * for the database,
+ *
+ * Its primary objects are:
+ * $(UL
+ *    $(LI Connection: $(UL $(LI Connection to the server, and querying and setting of server parameters.)))
+ *    $(LI Command:  Handling of SQL requests/queries/commands, with principal methods:
+ *       $(UL
+               $(LI execSQL() - plain old SQL query.)
+ *            $(LI execTuple() - get a set of values from a select or similar query into a matching tuple of D variables.)
+ *            $(LI execPrepared() - execute a prepared statement.)
+ *            $(LI execResult() - execute a raw SQL statement and get a complete result set.)
+ *            $(LI execSequence() - execute a raw SQL statement and handle the rows one at a time.)
+ *            $(LI execPreparedResult() - execute a prepared statement and get a complete result set.)
+ *            $(LI execPreparedSequence() - execute a prepared statement and handle the rows one at a time.)
+ *            $(LI execFunction() - execute a stored function with D variables as input and output.)
+ *            $(LI execProcedure() - execute a stored procedure with D variables as input.)
+ *        )
+ *    )
+ *    $(LI ResultSet: $(UL $(LI A random access range of rows, where a Row is basically an array of variant.)))
+ *    $(LI ResultSequence: $(UL $(LIAn input range of similar rows.)))
+ * )
+ *
+ * It has currently only been compiled and unit tested on Ubuntu with D2.055 using a TCP loopback connection
+ * to a server on the local machine.
+ *
+ * There are numerous examples of usage in the unittest sections.
+ *
+ * The file mysqld.sql, included with the module source code, can be used to generate the tables required by the unit tests.
+ *
+ * There is an outstanding issue with Connections. Normally MySQL clients sonnect to a server on the same machine
+ * via a Unix socket on *nix systems, and through a named pipe on Windows. Neither of these conventions is
+ * currently supported. TCP must be used for all connections.
+ *
+ * Since there is currently no SHA1 support on Phobos, a simple translation of the NIST example C code for SHA1
+ * is also included with this module.
+ *
+ * Copyright: Copyright 2011
+ * License:   $(LINK www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
+ * Author:   Steve Teale
+ */
+module mysql;
 
 import sha1;
 
@@ -10,6 +66,9 @@ import std.conv;
 import std.variant;
 import std.datetime;
 
+/**
+ * An exception type to distinguish exceptions thrown by this module.
+ */
 class MySQLException: Exception
 {
    this(string msg, string file, uint line) { super(msg, file, line); }
@@ -17,7 +76,8 @@ class MySQLException: Exception
 alias MySQLException MYX;
 
 /**
- * A MySQL time column can store either a time-of-day or a time difference.
+ * A simple struct to represent time difference.
+ *
  * D's std.datetime does not have a type that is closely compatible with the MySQL
  * interpretation of a time difference, so we define a struct here to hold such
  * values.
@@ -30,7 +90,16 @@ struct TimeDiff
    ubyte hours, minutes, seconds;
 }
 
-// This function is used to extract a time difference from a binary encoded row
+/**
+ * Function to extract a time difference from a binary encoded row.
+ *
+ * Time/date structures are packed by the server into a byte sub-packet
+ * with a leading length byte, and a minimal number of bytes to embody the data.
+ *
+ * Params: a = slice of a protocol packet beginning at the length byte for a chunk of time data
+ *
+ * Returns: A populated or default initialized TimeDiff struct.
+ */
 TimeDiff toTimeDiff(ubyte[] a)
 {
    enforceEx!MYX(a.length, "Supplied byte array is zero length");
@@ -54,7 +123,15 @@ TimeDiff toTimeDiff(ubyte[] a)
    return td;
 }
 
-// This function is used to extract a time difference from a string encoded row
+/**
+ * Function to extract a time difference from a text encoded column value.
+ *
+ * Text representations of a time difference are like -750:12:02 - 750 hours
+ * 12 minutes and two seconds ago.
+ *
+ * Params: s = A string representation of the time difference.
+ * Returns: A populated or default initialized TimeDiff struct.
+ */
 TimeDiff toTimeDiff(string s)
 {
    TimeDiff td;
@@ -73,7 +150,15 @@ TimeDiff toTimeDiff(string s)
    return td;
 }
 
-// This function is used to extract a time of day from a binary encoded row
+/**
+ * Function to extract a TimeOfDay from a binary encoded row.
+ *
+ * Time/date structures are packed by the server into a byte sub-packet
+ * with a leading length byte, and a minimal number of bytes to embody the data.
+ *
+ * Params: a = slice of a protocol packet beginning at the length byte for a chunk of time data
+ * Returns: A populated or default initialized std.datetime.TimeOfDay struct.
+ */
 TimeOfDay toTimeOfDay(ubyte[] a)
 {
    enforceEx!MYX(a.length, "Supplied byte array is zero length");
@@ -88,7 +173,14 @@ TimeOfDay toTimeOfDay(ubyte[] a)
    return tod;
 }
 
-// This function is used to extract a time of day from a string encoded row
+/**
+ * Function to extract a TimeOfDay from a text encoded column value.
+ *
+ * Text representations of a time of day are as in 14:22:02
+ *
+ * Params: s = A string representation of the time.
+ * Returns: A populated or default initialized std.datetine.TimeOfDay struct.
+ */
 TimeOfDay toTimeOfDay(string s)
 {
    TimeOfDay tod;
@@ -101,6 +193,15 @@ TimeOfDay toTimeOfDay(string s)
    return tod;
 }
 
+/**
+ * Function to pack a TimeOfDay into a binary encoding for transmission to the server.
+ *
+ * Time/date structures are packed into a string of bytes with a leading length byte,
+ * and a minimal number of bytes to embody the data.
+ *
+ * Params: tod = TimeOfDay struct.
+ * Returns: Packed ubyte[].
+ */
 ubyte[] pack(TimeOfDay tod)
 {
    ubyte[] rv;
@@ -118,6 +219,15 @@ ubyte[] pack(TimeOfDay tod)
    return rv;
 }
 
+/**
+ * Function to extract a Date from a binary encoded row.
+ *
+ * Time/date structures are packed by the server into a byte sub-packet
+ * with a leading length byte, and a minimal number of bytes to embody the data.
+ *
+ * Params: a = slice of a protocol packet beginning at the length byte for a chunk of Date data
+ * Returns: A populated or default initialized std.datetime.Date struct.
+ */
 Date toDate(ubyte[] a)
 {
    enforceEx!MYX(a.length, "Supplied byte array is zero length");
@@ -130,6 +240,14 @@ Date toDate(ubyte[] a)
    return Date(year, month, day);
 }
 
+/**
+ * Function to extract a Date from a text encoded column value.
+ *
+ * Text representations of a Date are as in 2011-11-11
+ *
+ * Params: a = A string representation of the time difference.
+ * Returns: A populated or default initialized std.datetime.Date struct.
+ */
 Date toDate(string s)
 {
    int year = parse!(ushort)(s);
@@ -140,6 +258,15 @@ Date toDate(string s)
    return Date(year, month, day);
 }
 
+/**
+ * Function to pack a Date into a binary encoding for transmission to the server.
+ *
+ * Time/date structures are packed into a string of bytes with a leading length byte,
+ * and a minimal number of bytes to embody the data.
+ *
+ * Params: dt = std.datetime.Date struct.
+ * Returns: Packed ubyte[].
+ */
 ubyte[] pack(Date dt)
 {
    ubyte[] rv;
@@ -158,6 +285,16 @@ ubyte[] pack(Date dt)
    return rv;
 }
 
+/**
+ * Function to extract a DateTime from a binary encoded row.
+ *
+ * Time/date structures are packed by the server into a byte sub-packet
+ * with a leading length byte, and a minimal number of bytes to embody the data.
+ *
+ * Params: a = slice of a protocol packet beginning at the length byte for a chunk of
+ *                       DateTime data
+ * Returns: A populated or default initialized std.datetime.DateTime struct.
+ */
 DateTime toDateTime(ubyte[] a)
 {
    enforceEx!MYX(a.length, "Supplied byte array is zero length");
@@ -181,6 +318,14 @@ DateTime toDateTime(ubyte[] a)
    return dt;
 }
 
+/**
+ * Function to extract a DateTime from a text encoded column value.
+ *
+ * Text representations of a DateTime are as in 2011-11-11 12:20:02
+ *
+ * Params: a = A string representation of the time difference.
+ * Returns: A populated or default initialized std.datetime.DateTime struct.
+ */
 DateTime toDateTime(string s)
 {
    int year = parse!(ushort)(s);
@@ -197,6 +342,14 @@ DateTime toDateTime(string s)
    return DateTime(year, month, day, hour, minute, second);
 }
 
+/**
+ * Function to extract a DateTime from a ulong.
+ *
+ * This is used to support the TimeStamp  struct.
+ *
+ * Params: x = A ulong e.g. 20111111122002UL.
+ * Returns: A populated std.datetime.DateTime struct.
+ */
 DateTime toDateTime(ulong x)
 {
    int second = cast(int) x%100;
@@ -217,7 +370,15 @@ DateTime toDateTime(ulong x)
    return DateTime(year, month, day, hour, minute, second);
 }
 
-immutable(uint)[4] dtLengths = [ 1, 5, 8, 12 ];
+/**
+ * Function to pack a DateTime into a binary encoding for transmission to the server.
+ *
+ * Time/date structures are packed into a string of bytes with a leading length byte,
+ * and a minimal number of bytes to embody the data.
+ *
+ * Params: dt = std.datetime.DateTime struct.
+ * Returns: Packed ubyte[].
+ */
 ubyte[] pack(DateTime dt)
 {
    uint len = 1;
@@ -246,42 +407,61 @@ ubyte[] pack(DateTime dt)
    return rv;
 }
 
-// It is assumed that insertion of timestamp values will not be common, since in general,
-// TIMETPAMP columns are used for recording the time of a row insertion, and are filled in
-// automatically by the server. If you want to force a timestamp value in a prepared insert,
-//  set it into a timestamp struct as an unsigned long in the format YYYYMMDDHHMMSS
-// When it is retrieved as part of a result set it will be as  DateTime struct.
+/**
+ * A D struct to stand for a TIMESTAMP
+ *
+ * It is assumed that insertion of TIMESTAMP values will not be common, since in general,
+ * such columns are used for recording the time of a row insertion, and are filled in
+ * automatically by the server. If you want to force a timestamp value in a prepared insert,
+ * set it into a timestamp struct as an unsigned long in the format YYYYMMDDHHMMSS
+ * and use that for the approriate parameter. When TIMESTAMPs are retrieved as part of
+ * a result set it will be as DateTime structs.
+ */
 struct Timestamp
 {
    ulong rep;
 }
 
-//alias VariantN!(maxSize!(creal, char[], void delegate(),
-//                                Time, Date, DateTime, Timestamp)) MyVariant;
-alias Variant MyVariant;
-
+/**
+ * Server capability flags.
+ *
+ * During the connection handshake process, the server sends a uint of flags describing its
+ * capabilities
+ */
 enum SvrCapFlags: uint
 {
-    SECURE_PWD = 1,
-    FOUND_NOT_AFFECTED =	2,
-    ALL_COLUMN_FLAGS =	4,
-    WITH_DB	= 8,
-    NO_SCHEMA = 16,
-    CAN_COMPRESS	= 32,
-    ODBC = 64,
-    LOCAL_FILES = 128,
-    IGNORE_SPACE = 256,
-    PROTOCOL41 = 512,
-    INTERACTIVE = 1024,
-    SSL  = 2048,
-    IGNORE_SIGPIPE  = 4096,
-    TRANSACTIONS = 8192,
+    SECURE_PWD = 1,                    /// Long passwords
+    FOUND_NOT_AFFECTED =	2,     /// Report rows found rather than rows affected
+    ALL_COLUMN_FLAGS =	4,        /// Send all column flags
+    WITH_DB	= 8,                         /// Can take database as part of login
+    NO_SCHEMA = 16,                    /// Can disallow database name as part of column name database.table.column
+    CAN_COMPRESS	= 32,              /// Can compress packets
+    ODBC = 64,                               /// Can handle ODBC
+    LOCAL_FILES = 128,                 /// Can use LOAD DATA LOCAL
+    IGNORE_SPACE = 256,              /// Can ignore spaces before '('
+    PROTOCOL41 = 512,                  /// Can use 4.1+ protocol
+    INTERACTIVE = 1024,                /// Interactive client?
+    SSL  = 2048,                              /// Can switch to SSL after handshake
+    IGNORE_SIGPIPE  = 4096,         /// Ignore sigpipes?
+    TRANSACTIONS = 8192,             /// Transaction support
     RESERVED = 16384,
-    SECURE_CONNECTION = 32768,
-    MULTI_STATEMENTS = 65536,
-    MULTI_RESULTS = 131072
+    SECURE_CONNECTION = 32768, /// 4.1+ authentication
+    MULTI_STATEMENTS = 65536,    /// Multiple statement support
+    MULTI_RESULTS = 131072         /// Multiple result set support
 }
+// 000000001111011111111111
+immutable uint defaultClientFlags =
+      SvrCapFlags.SECURE_PWD | SvrCapFlags.ALL_COLUMN_FLAGS |
+      SvrCapFlags.WITH_DB | SvrCapFlags.PROTOCOL41 |
+      SvrCapFlags.SECURE_CONNECTION;// | SvrCapFlags.MULTI_STATEMENTS |
+      //SvrCapFlags.MULTI_RESULTS;
 
+/**
+ * Column type codes
+ *
+ * DEFAULT means infer parameter type or column type from D variable type.
+ *
+ */
 enum SQLType
 {
    DEFAULT =          -1,
@@ -314,6 +494,9 @@ enum SQLType
    GEOMETRY =     0xff
 }
 
+/**
+ * Server refresh flags
+ */
 enum RefreshFlags
 {
    GRANT =      1,
@@ -402,79 +585,7 @@ ulong parseLCB(ref ubyte* ubp, out bool nullFlag)
          throw new MYX("The input value corresponds to an error packet.", __FILE__, __LINE__);
    }
 }
-/+
-ulong parseLCB2(ref ubyte* ubp, ubyte* ep, out bool nullFlag, out bool incomplete)
-{
-   nullFlag = false;
-   if (ubp >= ep)
-   {
-      incomplete  = true;
-      return 0;
-   }
-   if (*ubp < 251)
-   {
-      return cast(ulong) *ubp++;
-   }
-   ulong t;
-   switch (*ubp)
-   {
-      case 251:
-         nullFlag = true;
-         ubp++;
-         return 0;
-      case 252:
-         if (ep-ubp < 3)
-         {
-            incomplete = true;
-            return 0;
-         }
-         t |= ubp[2];
-         t <<= 8;
-         t |= ubp[1];
-         ubp += 3;
-         return t;
-      case 253:
-         if (ep-ubp < 4)
-         {
-            incomplete = true;
-            return 0;
-         }
-         t |= ubp[3];
-         t <<= 8;
-         t |= ubp[2];
-         t <<= 8;
-         t |= ubp[1];
-         ubp += 4;
-         return t;
-      case 254:
-         if (ep-ubp < 9)
-         {
-            incomplete = true;
-            return 0;
-         }
-         t |= ubp[8];
-         t <<= 8;
-         t |= ubp[7];
-         t <<= 8;
-         t |= ubp[6];
-         t <<= 8;
-         t |= ubp[5];
-         t <<= 8;
-         t |= ubp[4];
-         t <<= 8;
-         t |= ubp[3];
-         t <<= 8;
-         t |= ubp[2];
-         t <<= 8;
-         t |= ubp[1];
-         ubp += 9;
-         return t;
-      case 255:
-      default:
-         throw new MYX("A length code value corresponds to an error packet.", __FILE__, __LINE__);
-   }
-}
-+/
+
 ubyte[] parseLCS(ref ubyte* ubp, out bool nullFlag)
 {
    ubyte[] mt;
@@ -625,7 +736,14 @@ unittest
    assert(x.length == 0x20000ff && x[0] == '<' && x[0x20000fe] == '>');
 }
 
-struct OKPacket      // Used for error also
+
+/**
+ * A struct representing an OK or Error packet
+ *
+ * OK packets begin with a zero byte - Error packets with 0xff
+ *
+ */
+struct OKPacket
 {
    bool error;
    bool nullFlag;
@@ -687,6 +805,12 @@ struct OKPacket      // Used for error also
    }
 }
 
+/**
+ * A struct representing a field (column) description packet
+ *
+ * These packets, one for each column are sent before the data of a result set,
+ * followed by an EOF packet.
+ */
 struct FieldDescription
 {
 private:
@@ -706,6 +830,11 @@ private:
    void delegate(ubyte[], bool) chunkDelegate;
 
 public:
+/**
+ * Construct a FieldDescription from the raw data packet
+ *
+ * Parameters: packet = The packet contents excluding the 4 byte packet header
+ */
    this(ubyte[] packet)
    {
       ubyte* sp = packet.ptr;
@@ -731,20 +860,35 @@ public:
          _deflt = parseLCB(ubp, isnull);
       }
    }
+   /// Database name for column as string
    @property string db() { return _db; }
+   /// Table name for column as string - this could be an alias as in 'from tablename as foo'
    @property string table() { return _table; }
+   /// Real table name for column as string
    @property string originalTable() { return _originalTable; }
+   /// Column name as string - this could be an alias
    @property string name() { return _name; }
+   /// Real column name as string
    @property string originalName() { return _originalName; }
+   /// The character set in force
    @property ushort charSet() { return _charSet; }
+   /// The 'length' of the column as defined at table creation
    @property uint length() { return _length; }
+   /// The type of the column hopefully (but not always) corresponding to enum SQLType. Only the low byte currently used
    @property ushort type() { return _type; }
+   /// Column flags - unsigned, binary, null and so on
    @property ushort flags() { return _flags; }
+   /// Precision for floating point values
    @property ubyte scale() { return _scale; }
+   /// NotNull from flags
    @property bool notNull() { return (_flags & 1) != 0; }
+   /// Unsigned from flags
    @property bool unsigned() { return (_flags & 0x20) != 0; }
+   /// Binary from flags
    @property bool binary() { return (_flags & 0x80) != 0; }
+   /// Is-enum from flags
    @property bool isenum() { return (_flags & 0x100) != 0; }
+   /// Is-set (a SET column that is) from flags
    @property bool isset() { return (_flags & 0x800) != 0; }
 
    void show()
@@ -753,6 +897,15 @@ public:
    }
 }
 
+/**
+ * A struct representing a prepared statement parameter description packet
+ *
+ * These packets, one for each parameter are sent in response to the prepare command,
+ * followed by an EOF packet.
+ *
+ * Sadly it seems that this facility is only a stub. The correct number of packets is sent,
+ * but they contain no useful information and are all the same.
+ */
 struct ParamDescription
 {
 private:
@@ -777,12 +930,26 @@ public:
    @property bool unsigned() { return (_flags & 0x20) != 0; }
 }
 
+/**
+ * A struct representing an EOF packet
+ *
+ * an EOF packet is sent after each sequence of field description and parameter description
+ * packets, and after a sequence of result set row packets.
+ *
+ * These EOF packets contain a server status and a warning count.
+ */
 struct EOFPacket
 {
 private:
    ushort _warnings;
    ushort _serverStatus;
 public:
+
+/**
+ * Construct an EOFPacket struct from the raw data packet
+ *
+ * Parameters: packet = The packet contents excluding the 4 byte packet header
+ */
    this(ubyte[] packet)
    {
       ubyte* ubp = packet.ptr;
@@ -791,8 +958,19 @@ public:
       _warnings = getShort(ubp);
       _serverStatus = getShort(ubp);
    }
+
+   /// Retrieve the warning count
+   @property ushort warnings() { return _warnings; }
+   /// Retrieve the server status
+   @property ushort serverStatus() { return _serverStatus; }
 }
 
+/**
+ * A struct representing the collation of a sequence of FieldDescription packets.
+ *
+ * This data gets filled in after a query (prepared or otherwise) that creates a result set completes.
+ * All the FD packets, and an EOF packet must be eaten before the row data packets can be read.
+ */
 struct ResultSetHeaders
 {
 private:
@@ -802,6 +980,14 @@ private:
    ushort _warnings;
 
 public:
+
+/**
+ * Construct a ResultSetHeaders struct from a sequence of FieldDescription packets and an EOF packet.
+ *
+ * Parameters:
+ *    con = A Connection via which the packets are read
+ *    fieldCount = the number of fields/columns generated by the query
+ */
    this(Connection con, uint fieldCount)
    {
       ubyte[] packet;
@@ -826,6 +1012,16 @@ public:
       _warnings = eof._warnings;
    }
 
+/**
+ * Add specialization information to one or more field descriptions.
+ *
+ * Currently the only specialization supported is the capability to deal with long data
+ * e.g. BLOB or TEXT data in chunks by stipulating a chunkSize and a delegate to sink
+ * the data.
+ *
+ * Parameters:
+ *    csa = An array of ColumnSpecialization structs
+ */
    void addSpecializations(ColumnSpecialization[] csa)
    {
       foreach(CSN csn; csa)
@@ -837,10 +1033,13 @@ public:
       }
    }
 
+   /// Index into the set of field descriptions
    FieldDescription opIndex(size_t i) { return _fieldDescriptions[i]; }
-
+   /// Get the number of fields in a result row.
    @property fieldCount() { return _fieldCount; }
+   /// Get the warning count as per the EOF packet
    @property ushort warnings() { return _warnings; }
+   /// Get an array of strings representing the column names
    @property string[] fieldNames() { return _fieldNames; }
 
    void show()
@@ -850,6 +1049,11 @@ public:
    }
 }
 
+/**
+ * A struct representing the collation of a prepared statement parameter description sequence
+ *
+ * As noted above - parameter descriptions are not fully implemented by MySQL.
+ */
 struct PreparedStmtHeaders
 {
 private:
@@ -921,6 +1125,24 @@ public:
    }
 }
 
+/**
+ * A struct representing a database connection.
+ *
+ * The Connection is responsible for handshaking with the server to establish authentication.
+ * It then passes client preferences to the server, and subsequently is the channel for all
+ * command packets that are sent, and all response packets received.
+ *
+ * Uncompressed packets consist of a 4 byte header - 3 bytes of length, and one byte as a packet
+ * number. Connection deals with the headers and ensures that packet numbers are sequential.
+ *
+ * The initial packet is sent by the server - esentially a 'hello' packet inviting login. That packet
+ * has a sequence number of zero. That sequence number is the incremented by cliemt and server
+ * packets thruogh the handshake sequence.
+ *
+ * After login all further sequences are initialized by the client sending a command packet with a
+ * zero sequence number, to which the server replies with zero or more packets with sequential
+ * sequence numbers.
+ */
 class Connection
 {
 protected:
@@ -1131,15 +1353,21 @@ protected:
       return result;
    }
 
-   void setClientFlags()
+   void setClientFlags(uint capFlags)
    {
-      _cCaps |= SvrCapFlags.SECURE_PWD;
-      _cCaps |= SvrCapFlags.ALL_COLUMN_FLAGS;
-      _cCaps |= SvrCapFlags.WITH_DB;
-      _cCaps |= SvrCapFlags.PROTOCOL41;
-      _cCaps |= SvrCapFlags.SECURE_CONNECTION;
-      _cCaps |= SvrCapFlags.MULTI_STATEMENTS;
-      _cCaps |= SvrCapFlags.MULTI_RESULTS;
+      uint filter = 1;
+      uint sCaps = _sCaps;
+      uint cCaps = 0;
+      for (int i = 0; i < 24; i++)
+      {
+         if (filter & _sCaps)    // can the server do this capability?
+         {
+            if (filter & capFlags)
+               cCaps |= filter;
+         }
+         filter <<= 1;
+      }
+      _cCaps = cCaps;
    }
 
    static string[] parseConnectionString(string cs)
@@ -1154,7 +1382,6 @@ protected:
             throw new Exception("Bad connection string: " ~ cs);
          string name = strip(a2[0]);
          string val = strip(a2[1]);
-         val ~= "\0";
          switch (name)
          {
             case "host":
@@ -1177,37 +1404,9 @@ protected:
       return rv;
    }
 
-   ~this() { if (_open) close(); }
-
-public:
-
-   this(string host, string user, string pwd, string db)
-   {
-      _host = host;
-      _user = user;
-      _pwd = pwd;
-      _db = db;
-      init_connection();
-      parseGreeting();
-      _open = 1;
-   }
-
-   this(string cs)
-   {
-      string[] a = parseConnectionString(cs);
-      _host = a[0];
-      _user = a[1];
-      _pwd = a[2];
-      _db = a[3];
-      init_connection();
-      parseGreeting();
-      _open = 1;
-   }
-
    bool open()
    {
       _token = makeToken();
-      setClientFlags();
       buildAuthPacket();
       _socket.send(_packet);
       uint pl;
@@ -1219,6 +1418,77 @@ public:
       return true;
    }
 
+   ~this() { if (_open) close(); }
+
+public:
+
+/**
+ * Construct opened connection.
+ *
+ * After the connection is created, and the initial invitation is received from the server
+ * client preferences can be set, and authentication can then be attempted.
+ *
+ * Parameters:
+ *    host = An IP address in numeric dotted form, or as a host  name.
+ *    user = The user name to authenticate.
+ *    password = Users password.
+ *    db = Desired initial database.
+ *    capFlags = The set of flag bits from the server's capabilities that the client requires
+ */
+   this(string host, string user, string pwd, string db, uint capFlags = defaultClientFlags)
+   {
+      _host = host;
+      _user = user;
+      _pwd = pwd;
+      _db = db;
+      init_connection();
+      parseGreeting();
+      _open = 1;
+      setClientFlags(capFlags);
+      open();
+   }
+
+/**
+ * Construct opened connection.
+ *
+ * After the connection is created, and the initial invitation is received from the server
+ * client preferences are set, and authentication can then be attempted.
+ *
+ * TBD The connection string needs work to allow for semicolons in its parts!
+ *
+ * Parameters:
+ *    cs = A connetion string of the form "host=localhost;user=user;pwd=password;db=mysqld"
+ *    capFlags = The set of flag bits from the server's capabilities that the client requires
+ */
+   this(string cs,  uint capFlags = defaultClientFlags)
+   {
+      string[] a = parseConnectionString(cs);
+      _host = a[0];
+      _user = a[1];
+      _pwd = a[2];
+      _db = a[3];
+      init_connection();
+      parseGreeting();
+      _open = 1;
+      setClientFlags(capFlags);
+      open();
+   }
+/**
+ * Explicitly close the connection.
+ *
+ * This is a two-stage process. First tell the server we are quitting this connection, and
+ * then close the socket.
+ *
+ * Idiomatic use as follows is suggested:
+------------------
+{
+   auto con = Connection("localhost:user:password:mysqld");
+   scope(exit) con.close();
+   // Use the connection
+   ...
+}
+------------------
+ */
    void close()
    {
       if (_open > 1)
@@ -1237,18 +1507,37 @@ public:
       _cpn = 0;
    }
 
+/**
+ * Select a current database.
+ *
+ * Params: dbName = Name of the requested database
+ * Throws: MySQLEcception
+ */
    void selectDB(string dbName)
    {
       sendCmd(2, dbName);
       getCmdResponse();
+      _db = dbName;
    }
 
+/**
+ * Check the server status
+ *
+ * Returns: An OKPacket from which server status can be determined
+ * Throws: MySQLEcception
+ */
    OKPacket pingServer()
    {
       sendCmd(0x0e, "");
       return getCmdResponse();
    }
 
+/**
+ * Refresh some feature[s] of he server.
+ *
+ * Returns: An OKPacket from which server status can be determined
+ * Throws: MySQLEcception
+ */
    OKPacket refreshServer(int flags)
    {
       ubyte[] t;
@@ -1258,6 +1547,10 @@ public:
       return getCmdResponse();
    }
 
+/**
+ * Get a textual report on the servr status.
+ *
+ */
    string serverStats()
    {
       sendCmd(0x09, "");
@@ -1266,6 +1559,13 @@ public:
       return cast(string) _packet;
    }
 
+/**
+ * Enable multiple statement commands
+ *
+ * This can be used later if this feature was not requested in the client capability flags.
+ *
+ * Params: on = Boolean value to turn th capability on or off.
+ */
    void enableMultiStatements(bool on)
    {
       ubyte[] t;
@@ -1280,22 +1580,26 @@ public:
       enforceEx!MYX(_packet[0] == 254 && pl == 5, "Unexpected response to SET_OPTION command");
    }
 
-   @property socket() { return _socket; }
-   @property protocol() { return _protocol; }
-   @property serverVersion() { return _serverVersion; }
-   @property serverCapabilities() { return _sCaps; }
-   @property serverStatus() { return _serverStatus; }
-   @property charSet() { return _sCharSet; }
-   @property currentDB() { return _db; }
+   /// Return the in-force protocol number
+   @property ubyte protocol() { return _protocol; }
+   /// Server version
+   @property string serverVersion() { return _serverVersion; }
+   /// Server capability flags
+   @property uint serverCapabilities() { return _sCaps; }
+   /// Server status
+   @property ushort serverStatus() { return _serverStatus; }
+   /// Current character set
+   @property ubyte charSet() { return _sCharSet; }
+   /// Current database
+   @property string currentDB() { return _db; }
 }
 
 unittest
 {
-   Connection c;
+   bool ok = true;
    try
    {
-      c = new Connection("localhost", "user", "password", "mysqld");
-      c.open();
+      auto c = new Connection("host=localhost;user=user;pwd=password;db=mysqld");
       scope(exit) c.close();
       // These may vary according to the server setup
       assert(c.protocol == 10);
@@ -1323,58 +1627,76 @@ unittest
       assert(stats.indexOf("Uptime") == 0);
       c.enableMultiStatements(true);   // Need to be tested later with a prepared "CALL"
       c.enableMultiStatements(false);
-      c.close();
    }
    catch (Exception x)
    {
       writefln("(%s: %s) %s", x.file, x.line, x.msg);
+      ok = false;
    }
-   writeln("Connection unit tests done");
+   assert(ok);
 }
 
-typedef void[] delegate(ref uint) InChunkDelegate;
-typedef void delegate(void[], ulong) OutChunkDelegate;
-
+/**
+ * A struct to represent specializations of prepared statement parameters.
+ *
+ * There are two specializations. First you can set an isNull flag to indicate that the
+ * parameter is to have the SQL NULL value.
+ *
+ * Second, if you need to send large objects to the database it might be convenient to
+ * send them in pieces. These two variables allow for this. If both are provided
+ * then the corresponding column will be populated by calling the delegate repeatedly.
+ * the source should fill the indicated slice with data and arrange for the delegate to
+ * return the length of the data supplied. Af that is less than the chunkSize
+ * then the chunk will be assumed to be the last one.
+ */
 struct ParameterSpecialization
 {
    uint pIndex;    //parameter number 0 - number of params-1
    bool isNull;
    SQLType type = SQLType.DEFAULT;
-   // If you need to send large objects to the database it might be convenient to
-   // send them in pieces. These two variables allow for this. If both are provided
-   // then the corresponding column will be populated by calling the delegate repeatedly.
-   // the source should fill the indicated slice with data and arrange for the delegate to
-   // return the length of the data supplied. Af that is less than the length of the slice
-   // then the chunk will be assumed to be the last one.
    uint chunkSize;
    uint delegate(ubyte[]) chunkDelegate;
+   bool dummy;
 }
 alias ParameterSpecialization PSN;
 
+/**
+ * A struct to represent specializations of prepared statement parameters.
+ *
+ * If you are executing a query that will include result columns that are large objects
+ * it may be expedient to deal with the data as it is received rather than first buffering
+ * it to some sort of byte array. These two variables allow for this. If both are provided
+ * then the corresponding column will be fed to the stipulated delegate in chunks of
+ * chunkSize, with the possible exception of the last chunk, which may be smaller.
+ * The 'finished' argument will be set to true when the last chunk is set.
+ *
+ * Be aware when specifying types for column specializations that for some reason the
+ * field descriptions returned for a resultset have all of the types TINYTEXT, MEDIUMTEXT,
+ * TEXT, LONGTEXT, TINYBLOB, MEDIUMBLOB, BLOB, and LONGBLOB lumped as type 0xfc
+ * contrary to what it says in the protocol documentation.
+ */
 struct ColumnSpecialization
 {
-   uint cIndex;    //parameter number 0 - number of params-1
+   uint cIndex;    // parameter number 0 - number of params-1
    ushort type;
-   // If you are executing a query that will include result columns that are large objects
-   // it may be expedient to deal with the data as it is received rather than first buffering
-   // it to some sort of byte array. These two variables allow for this. If both are provided
-   // then the corresponding column will be fed to the stipulated delegate in chunks of
-   // chunkSize, with the possible exception of the last chunk, which may be smaller.
-   // The 'finished' argument will be set to true when the last chunk is set.
-   //
-   // Be aware when specifying types for column specializations that for some reason the
-   // field descriptions returned for a resultset have all of the types TINYTEXT, MEDIUMTEXT,
-   // TEXT, LONGTEXT, TINYBLOB, MEDIUMBLOB, BLOB, and LONGBLOB lumped as type 0xfc
-   // contrary to what it says in the protocol documentation.
    uint chunkSize;
    void delegate(ubyte[] chunk, bool finished) chunkDelegate;
 }
 alias ColumnSpecialization CSN;
 
+/**
+ * A struct to represent a single row of a result set.
+ *
+ * The row struct is used for both 'traditional' and 'prepared' result sets. It consists of parallel arrays
+ * of Variant and bool, with the bool array indicating which of the result set columns are NULL.
+ *
+ * I have been agitating for some kind of null indicator that can be set for a Variant without destroying
+ * its inherent type information. If this were the case, then the bool array could disappear.
+ */
 struct Row
 {
 private:
-   MyVariant[] _uva;
+   Variant[] _uva;
    bool[] _nulls;
    bool _valid;
 
@@ -1419,6 +1741,21 @@ private:
 
 public:
 
+/**
+ * A constructor to extract the column data from a row data packet.
+ *
+ * If the data for the row exceeds the server's maximum packet size, then several packets will be
+ * sent for the row that taken together constitute a logical row data packet. The logic of the data
+ * recovery for a Row attempts to minimize the quantity of data that is bufferred. Users can assist
+ * in this by specifying chunked data transfer in cases where results sets can include long
+ * column values.
+ *
+ * The row struct is used for both 'traditional' and 'prepared' result sets. It consists of parallel arrays
+ * of Variant and bool, with the bool array indicating which of the result set columns are NULL.
+ *
+ * I have been agitating for some kind of null indicator that can be set for a Variant without destroying
+ * its inherent type information. If this were the case, then the bool array could disappear.
+ */
    this(Connection con, ubyte[] packet, ResultSetHeaders rh, bool binary)
    {
       uint fc = rh._fieldCount;
@@ -1769,25 +2106,6 @@ public:
             }
          }
       Incomplete:
-      /+
-         if (incomplete)
-         {
-            // The server wil have sent the maximum logical packet, and will follow that with further
-            // packets containing the remaining data for the row. So if we have determined that the data
-            // for a column is incomplete, we must now now fetch at least the next one.
-            // We take the opportunity to save memory here by chopping off the part of the current packet
-            // that we have already used
-            uint npl;
-            ubyte[] more = con.getPacket(npl);
-            packet = packet[checkpoint..pl] ~ more;
-            p = 0;   // previous stuff now gone
-            checkpoint = p;
-            pl = packet.length;
-            i--;  // backtrack and try again to get the column where we failed. This could cause
-                  // further logical packets to be fetched in the case of a long blob.
-            incomplete = false;
-         }
-         +/
          if (incomplete)
          {
             // The server wil have sent the maximum logical packet, and will follow that with further
@@ -1858,12 +2176,34 @@ public:
       _valid = true;
    }
 
-   MyVariant opIndex(uint i) { return _uva[i]; }
+   /**
+    * Simplify retrieval of a column value by index.
+    *
+    * If the table you are working with does not allow NULL columns, this may be all you need. Otherwise
+    * you will have to use isNull(i) as well.
+    *
+    * Params: i = the zero based index of the column whose value is required.
+    * Returns: A Variant holding the column value.
+    */
+   Variant opIndex(uint i) { return _uva[i]; }
+   /**
+    * Check if a column in the result row was NULL
+    *
+    * Params: i = The zero based column index.
+    */
    @property bool isNull(uint i) { return _nulls[i]; }
 
    /**
     * Move the content of the row into a compatible struct
     *
+    * This method takes no account of NULL column values. If a column was NULL, the corresponding
+    * Variant value would be unchanged in those cases.
+    *
+    * The method will throw if the type of the Variant is not implicitly convertible to the corresponding
+    * struct member
+    *
+    * Params: S = a struct type.
+    *                s = an ref instance of the type
     */
    void toStruct(S)(ref S s) if (is(S == struct))
    {
@@ -1877,18 +2217,35 @@ public:
 
    void show()
    {
-      foreach(MyVariant v; _uva)
+      foreach(Variant v; _uva)
          writef("%s, ", v.toString());
       writeln("");
    }
 }
 
+/**
+ * Composite representation of a column value
+ *
+ * Another case where a null flag on Variant would simplify matters.
+ */
 struct Column
 {
-   MyVariant val;
+   Variant val;
    bool isNull;
 }
 
+/**
+ * Random access range of Rows.
+ *
+ * This is the entity that is returned by the Command methods execSQLResult and
+ * execSQLPrepared
+ *
+ * MySQL result sets can be up to 2^^64 rows, and the 32 bit implementation of the
+ * MySQL C API accomodates such potential massive result sets by storing the rows in
+ * a doubly linked list. I have taken the view that users who have a need for result sets
+ * up to this size should be working with a 64 bit system, and as such the 32 bit
+ * implementation will throw if the number of rows exceeds the 32 bit size_t.max.
+ */
 struct ResultSet
 {
 private:
@@ -1896,6 +2253,7 @@ private:
    string[] _colNames;
    size_t[] _rb;  // Current span of the range
    size_t _rc;
+   size_t _cr;
 
    this (Row[] ra, string[] colNames)
    {
@@ -1905,6 +2263,7 @@ private:
       _rb.length = _ra.length;
       for (int i = 0; i < _ra.length; i++)
          _rb[i] = i;
+      _cr = _rb[0];
    }
 
 public:
@@ -1929,7 +2288,8 @@ public:
    @property Row front()
    {
       enforceEx!MYX(_rb.length, "Attempted 'front' on empty ResultSet range.");
-      return _ra[_rb[0]];
+      _cr = _rb[0];
+      return _ra[_cr];
    }
    /**
     * Make the ResultSet behave as a random access range - back
@@ -1939,7 +2299,8 @@ public:
    @property Row back()
    {
       enforceEx!MYX(_rb.length, "Attempted 'back' on empty ResultSet range.");
-      return _ra[_rb[$-1]];
+      _cr = _rb[$-1];
+      return _ra[_cr];
    }
    /**
     * Make the ResultSet behave as a random access range - popFront()
@@ -1949,7 +2310,10 @@ public:
    {
       if (!_rb.length)
          throw new Exception("Attempted 'popFront' on empty ResultSet range.");
-      _rb= _rb[1 .. $];
+      bool updateCr = (_cr == _rb[0]);
+      _rb = _rb[1 .. $];
+      if (updateCr && _rb.length)
+         _cr = _rb[0];
    }
    /**
     * Make the ResultSet behave as a random access range - popBack
@@ -1959,7 +2323,10 @@ public:
    {
       enforceEx!MYX(_rb.length, "Attempted 'popBack' on empty ResultSet range.");
       // Fetch the required row
+      bool updateCr = (_cr == _rb[$-1]);
       _rb= _rb[0 .. $-1];
+      if (updateCr && _rb.length)
+         _cr = _rb[$-1];
    }
    /**
     * Make the ResultSet behave as a random access range - opIndex
@@ -1970,7 +2337,8 @@ public:
    {
       enforceEx!MYX(_rb.length, "Attempted to index into an empty ResultSet range.");
       enforceEx!MYX(i < _rb.length, "Requested range index out of range");
-      return _ra[_rb[i]];
+      _cr = _rb[i];
+      return _ra[_cr];
    }
    /**
     * Make the ResultSet behave as a random access range - length
@@ -1979,8 +2347,10 @@ public:
    @property size_t length() { return _rb.length; }
 
    /**
-    * Restore the range to its original span
+    * Restore the range to its original span.
     *
+    * Since the range is just a view of the data, we can easily revert to the
+    * initial state.
     */
    void revert()
    {
@@ -1992,9 +2362,12 @@ public:
    /**
     * Get a row as an associative array by column name
     *
+    * The row in question will be that which was the most recent subject of
+    * front, back, or opIndex. If there have been no such references it will be front.
     */
-    Column[string] colsByName(Row r)
+    Column[string] asAA()
     {
+       Row r = _ra[_cr];
        Column[string] aa;
        foreach (uint i, string s; _colNames)
        {
@@ -2005,13 +2378,28 @@ public:
        }
        return aa;
     }
+
+
+   /**
+    * Get the number of rows in the result set.
+    *
+    * Note that this is not neccessarlly the same as the length of the range.
+    */
+    @property size_t rowCount() { return _rc; }
 }
 
+/**
+ * Encapsulation of an SQL command or query.
+ *
+ * A Command be be either a one-off SQL query, or may use a prepared statement.
+ * Commands that are expected to return a result set - queries - have distinctive methods
+ * that are enforced. That is it will be an error to call such a method with an SQL command
+ * that does not produce a result set.
+ */
 struct Command
 {
 private:
    Connection _con;
-   Socket _socket;
    string _sql;
    uint _hStmt;
    ulong _insertID;
@@ -2019,7 +2407,7 @@ private:
    ushort _psParams, _psWarnings, _fieldCount;
    ResultSetHeaders _rsh;
    PreparedStmtHeaders _psh;
-   MyVariant[] _inParams;
+   Variant[] _inParams;
    ParameterSpecialization[] _psa;
 
    bool sendCmd(ubyte cmd)
@@ -2105,9 +2493,16 @@ private:
          if (_psa[i].chunkSize)
             longData= true;
          bool isnull = _psa[i].isNull;
-         MyVariant v = _inParams[i];
+         Variant v = _inParams[i];
          SQLType ext = _psa[i].type;
-         switch (v.type.toString())
+         string ts = v.type.toString();
+         bool isRef;
+         if (ts[$-1] == '*')
+         {
+            ts.length = ts.length-1;
+            isRef= true;
+         }
+         switch (ts)
          {
             case "bool":
                if (ext == SQLType.DEFAULT)
@@ -2117,29 +2512,30 @@ private:
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(2);
+               bool bv = isRef? *(v.get!(bool*)): v.get!(bool);
                vals[vcl++] = 1;
-               vals[vcl++] = (v == true)? 0x31: 0x30;
+               vals[vcl++] = bv? 0x31: 0x30;
                break;
             case "byte":   // TINY
                types[ct++] = 0x01;
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(1);
-               vals[vcl++] = v.get!(byte);
+               vals[vcl++] = isRef? *(v.get!(byte*)): v.get!(byte);
                break;
             case "ubyte":  // TINY UNSIGNED
                types[ct++] = 0x01;
                types[ct++] = 0x80;
                if (isnull) break;
                reAlloc(1);
-               vals[vcl++] = v.get!(ubyte);
+               vals[vcl++] = isRef? *(v.get!(ubyte*)): v.get!(ubyte);
                break;
             case "short":
                types[ct++] = 0x02;
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(2);
-               short si = v.get!(short);
+               short si = isRef? *(v.get!(short*)): v.get!(short);
                vals[vcl++] = cast(ubyte) (si & 0xff);
                vals[vcl++] = cast(ubyte) ((si >> 8) & 0xff);
                break;
@@ -2147,7 +2543,7 @@ private:
                types[ct++] = 0x02;
                types[ct++] = 0x80;
                reAlloc(2);
-               ushort us = v.get!(ushort);
+               ushort us = isRef? *(v.get!(ushort*)): v.get!(ushort);
                vals[vcl++] = cast(ubyte) (us & 0xff);
                vals[vcl++] = cast(ubyte) ((us >> 8) & 0xff);
                break;
@@ -2156,7 +2552,7 @@ private:
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(4);
-               int ii = v.get!(int);
+               int ii = isRef? *(v.get!(int*)): v.get!(int);
                vals[vcl++] = cast(ubyte) (ii & 0xff);
                vals[vcl++] = cast(ubyte) ((ii >> 8) & 0xff);
                vals[vcl++] = cast(ubyte) ((ii >> 16) & 0xff);
@@ -2167,7 +2563,7 @@ private:
                types[ct++] = 0x80;
                if (isnull) break;
                reAlloc(4);
-               uint ui = v.get!(uint);
+               uint ui = isRef? *(v.get!(uint*)): v.get!(uint);
                vals[vcl++] = cast(ubyte) (ui & 0xff);
                vals[vcl++] = cast(ubyte) ((ui >> 8) & 0xff);
                vals[vcl++] = cast(ubyte) ((ui >> 16) & 0xff);
@@ -2178,7 +2574,7 @@ private:
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(8);
-               long li = v.get!(long);
+               long li = isRef? *(v.get!(long*)): v.get!(long);
                vals[vcl++] = cast(ubyte) (li & 0xff);
                vals[vcl++] = cast(ubyte) ((li >> 8) & 0xff);
                vals[vcl++] = cast(ubyte) ((li >> 16) & 0xff);
@@ -2193,7 +2589,7 @@ private:
                types[ct++] = 0x80;
                if (isnull) break;
                reAlloc(8);
-               ulong ul = v.get!(ulong);
+               ulong ul = isRef? *(v.get!(ulong*)): v.get!(ulong);
                vals[vcl++] = cast(ubyte) (ul & 0xff);
                vals[vcl++] = cast(ubyte) ((ul >> 8) & 0xff);
                vals[vcl++] = cast(ubyte) ((ul >> 16) & 0xff);
@@ -2208,7 +2604,8 @@ private:
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(4);
-               ubyte* ubp = cast(ubyte*) v.peek!(float);
+               float f = isRef? *(v.get!(float*)): v.get!(float);
+               ubyte* ubp = cast(ubyte*) &f;
                vals[vcl++] = *ubp++;
                vals[vcl++] = *ubp++;
                vals[vcl++] = *ubp++;
@@ -2219,7 +2616,8 @@ private:
                types[ct++] = 0;
                if (isnull) break;
                reAlloc(8);
-               ubyte* ubp = cast(ubyte*) v.peek!(double);
+               double d = isRef? *(v.get!(double*)): v.get!(double);
+               ubyte* ubp = cast(ubyte*) &d;
                vals[vcl++] = *ubp++;
                vals[vcl++] = *ubp++;
                vals[vcl++] = *ubp++;
@@ -2232,7 +2630,7 @@ private:
             case "std.datetime.Date":
                types[ct++] = 0x0a;
                types[ct++] = 0;
-               Date date = v.get!(Date);
+               Date date = isRef? *(v.get!(Date*)): v.get!(Date);
                ubyte[] da = pack(date);
                uint l = da.length;
                if (isnull) break;
@@ -2243,7 +2641,7 @@ private:
             case "std.datetime.Time":
                types[ct++] = 0x0b;
                types[ct++] = 0;
-               TimeOfDay time = v.get!(TimeOfDay);
+               TimeOfDay time = isRef? *(v.get!(TimeOfDay*)): v.get!(TimeOfDay);
                ubyte[] ta = pack(time);
                uint l = ta.length;
                if (isnull) break;
@@ -2254,7 +2652,7 @@ private:
             case "std.datetime.DateTime":
                types[ct++] = 0x0c;
                types[ct++] = 0;
-               DateTime dt = v.get!(DateTime);
+               DateTime dt = isRef? *(v.get!(DateTime*)): v.get!(DateTime);
                ubyte[] da = pack(dt);
                uint l = da.length;
                if (isnull) break;
@@ -2265,8 +2663,8 @@ private:
             case "connect.Timestamp":
                types[ct++] = 0x07;
                types[ct++] = 0;
-               Timestamp ts = v.get!(Timestamp);
-               DateTime dt = toDateTime(ts.rep);
+               Timestamp tms = isRef? *(v.get!(Timestamp*)): v.get!(Timestamp);
+               DateTime dt = toDateTime(tms.rep);
                ubyte[] da = pack(dt);
                uint l = da.length;
                if (isnull) break;
@@ -2281,7 +2679,8 @@ private:
                   types[ct++] = cast(ubyte) ext;
                types[ct++] = 0;
                if (isnull) break;
-               ubyte[] packed = packLCS(cast(void[]) v.get!(string));
+               string s = isRef? *(v.get!(string*)): v.get!(string);
+               ubyte[] packed = packLCS(cast(void[]) s);
                reAlloc(packed.length);
                vals[vcl..vcl+packed.length] = packed[];
                vcl += packed.length;
@@ -2293,7 +2692,8 @@ private:
                   types[ct++] = cast(ubyte) ext;
                types[ct++] = 0;
                if (isnull) break;
-               ubyte[] packed = packLCS(cast(void[]) v.get!(char[]));
+               char[] ca = isRef? *(v.get!(char[]*)): v.get!(char[]);
+               ubyte[] packed = packLCS(cast(void[]) ca);
                reAlloc(packed.length);
                vals[vcl..vcl+packed.length] = packed[];
                vcl += packed.length;
@@ -2305,7 +2705,8 @@ private:
                   types[ct++] = cast(ubyte) ext;
                types[ct++] = 0;
                if (isnull) break;
-               ubyte[] packed = packLCS(cast(void[]) v.get!(byte[]));
+               byte[] ba = isRef? *(v.get!(byte[]*)): v.get!(byte[]);
+               ubyte[] packed = packLCS(cast(void[]) ba);
                reAlloc(packed.length);
                vals[vcl..vcl+packed.length] = packed[];
                vcl += packed.length;
@@ -2317,7 +2718,8 @@ private:
                   types[ct++] = cast(ubyte) ext;
                types[ct++] = 0;
                if (isnull) break;
-               ubyte[] packed = packLCS(cast(void[]) v.get!(ubyte[]));
+               ubyte[] uba = isRef? *(v.get!(ubyte[]*)): v.get!(ubyte[]);
+               ubyte[] packed = packLCS(cast(void[]) uba);
                reAlloc(packed.length);
                vals[vcl..vcl+packed.length] = packed[];
                vcl += packed.length;
@@ -2378,22 +2780,46 @@ private:
 
 public:
 
+   /**
+    * Construct a naked Command object
+    *
+    * Params: con = A Connection object to communicate with the server
+    */
+   this(Connection con)
+   {
+      _con = con;
+      _con.resetPacket();
+   }
+
+   /**
+    * Construct a Command object complete with SQL
+    *
+    * Params: con = A Connection object to communicate with the server
+    *                sql = SQL command string.
+    */
    this(Connection con, string sql)
    {
       _sql = sql;
       this(con);
    }
 
-   this(Connection con)
-   {
-      _con = con;
-      _con.resetPacket();
-      _socket = _con.socket;
-   }
-
    @property
    {
+      /// Get the current SQL for the Command
       string sql() { return _sql; }
+      /**
+       * Set a new SQL command.
+       *
+       * This can have quite profound side effects. It resets the Command to an initial state.
+       * If a query has been issued on the Command that produced a result set, then all of the
+       * result set packets - field description sequence, EOF packet, result rows sequence, EOF packet
+       * must be flushed from the server before any further operation can be performed on
+       * the Connection. If you want to write speedy and efficient MySQL programs, you should
+       * bear this in mind when designing your queries so that you are not requesting many
+       * rows when one would do.
+       *
+       * Params: sql = SQL command string.
+       */
       string sql(string sql)
       {
          purgeResult();
@@ -2402,6 +2828,21 @@ public:
       }
    }
 
+   /**
+    * Submit an SQL command to the server to be compiled into a prepared statement.
+    *
+    * The result of a successful outcome will be a statement handle - an ID - for the prepared statement,
+    * a count of the parameters required for excution of the statement, and a count of the columns
+    * that will be present in any result set that the command generates. Thes values will be stored in
+    * in the Command struct.
+    *
+    * The server will then proceed to send prepared statement headers, including parameter descriptions,
+    * and result set field descriptions, followed by an EOF packet.
+    *
+    * If there is an existing statement handle in the Command struct, that prepared statement is released.
+    *
+    * Throws: MySQLEXception if there are pending result set items, or if the server has a problem.
+    */
    void prepare()
    {
       enforceEx!MYX(!(_headersPending || _rowsPending), "There are result set elements pending - purgeResult() required.");
@@ -2433,6 +2874,13 @@ public:
       }
    }
 
+   /**
+    * Release a prepared statement.
+    *
+    * This method tells the server that it can dispose of the information it holds about the
+    * current prepared statement, and resets the Command object to an initial state in
+    * that respect.
+    */
    void releaseStatement()
    {
       ubyte[] packet;
@@ -2454,15 +2902,16 @@ public:
       _hStmt = 0;
    }
 
+   /**
+    * Flush any outstanding result set elements.
+    *
+    * When the server responds to a command that produces a result set, it queues the whole set
+    * of corresponding packets over the current connection. Before that Connection can embark on
+    * any new command, it must receive all of those packets and junk them.
+    * http://www.mysqlperformanceblog.com/2007/07/08/mysql-net_write_timeout-vs-wait_timeout-and-protocol-notes/
+    */
    ulong purgeResult()
    {
-      // If a command has been executed that produced a result set, there will be a queue of packets
-      // in the protocol 'pipeline', and these have to be cleared out before another command can be
-      // executed. In this case there are three variables to work with: _fieldCount, which will tell us how
-      // Many packets of Field data are queued up, _headersPending, which will be set if they have not
-      // been read, and _rowsPending which will be set if we have not used or wasted the rows.
-      //
-      // http://www.mysqlperformanceblog.com/2007/07/08/mysql-net_write_timeout-vs-wait_timeout-and-protocol-notes/
       ulong rows = 0;
       if (_fieldCount)
       {
@@ -2503,7 +2952,16 @@ public:
       return rows;
    }
 
-   void bindParameter(T)(T val, uint pIndex, ParameterSpecialization psn)
+   /**
+    * Bind a D variable to a prepared statement parameter.
+    *
+    * In this implementation, binding comprises setting a value into the appropriate element of
+    * an array of Variants which represent the parameters, and setting any required specializations.
+    *
+    * To bind to some D variable, we set the corrsponding variant with its address, so there is no
+    * need to rebind between calls to execPreparedXXX.
+    */
+   void bindParameter(T)(ref T val, uint pIndex, ParameterSpecialization psn = PSN(0, false, SQLType.DEFAULT, 0, null, true))
    {
       // Now in theory we should be able to check the parameter type here, since the protocol is supposed
       // to send us type information for the parameters, but this capability seems to be broken. This assertion
@@ -2515,16 +2973,63 @@ public:
       // number is within the required range
       enforceEx!MYX(_hStmt, "The statement must be prepared before parameters are bound.");
       enforceEx!MYX(pIndex < _psParams, "Parameter number is out of range for the prepared statement.");
-      _inParams[pIndex] = val;
-      psn.pIndex = pIndex;
-      _psa[pIndex] = psn;
+      _inParams[pIndex] = &val;
+      if (!psn.dummy)
+      {
+         psn.pIndex = pIndex;
+         _psa[pIndex] = psn;
+      }
    }
 
-   void bindParameters(MyVariant[] values, ParameterSpecialization[] psnList= null)
+   /**
+    * Bind a tuple of D variables to the parameters of a prepared statement.
+    *
+    * You can use this method to bind a set of variables if you don't need any specialization,
+    * that is there will be no null values, and chunked transfer is not neccessary.
+    *
+    * The tuple must match the required number of parameters, and it is the programmer's responsibility
+    * to ensure that they are of appropriate types.
+    */
+   void bindParameterTuple(T...)(ref T args)
    {
       enforceEx!MYX(_hStmt, "The statement must be prepared before parameters are bound.");
-      enforceEx!MYX(values.length == _psParams, "Param count supplied does not match prepared statement");
-      _inParams[] = values[];
+      enforceEx!MYX(args.length == _psParams, "Argument list supplied does not match the number of parameters.");
+      foreach (uint i, dummy; args)
+         _inParams[i] = &args[i];
+   }
+
+   /**
+    * Bind a Variant[] as the parameters of a prepared statement.
+    *
+    * You can use this method to bind a set of variables in Variant form to the parameters of a prepared statement.
+    *
+    * Parameter specializations can be added if required. This method could be used to add records from a data
+    * entry form along the lines of
+------------
+auto c = Command(con, "insert into table42 values(?, ?, ?)");
+c.prepare();
+Variant[] va;
+va.length = 3;
+c.bindParameters(va);
+DataRecord dr;    // Some data input facility
+ulong ra;
+do
+{
+   dr.get();
+   va[0] = dr("Name");
+   va[1] = dr("City");
+   va[2] = dr("Whatever");
+   c.execPrepared(ra);
+} while(tod < "17:30");
+------------
+    * Params: va = External list of Variants to be used as parameters
+    *                psnList = any required specializations
+    */
+   void bindParameters(Variant[] va, ParameterSpecialization[] psnList= null)
+   {
+      enforceEx!MYX(_hStmt, "The statement must be prepared before parameters are bound.");
+      enforceEx!MYX(va.length == _psParams, "Param count supplied does not match prepared statement");
+      _inParams[] = va[];
       if (psnList !is null)
       {
          foreach (PSN psn; psnList)
@@ -2532,21 +3037,37 @@ public:
       }
    }
 
-   void bindParameterTuple(T...)(T args)
+   /**
+    * Access a prepared statement parameter for update.
+    *
+    * Another style of usage would simply update the parameter Variant directly
+    *
+------------
+c.param(0) = 42;
+c.param(1) = "The answer";
+------------
+    * Params: index = The zero based index
+    */
+   ref Variant param(uint index)
    {
       enforceEx!MYX(_hStmt, "The statement must be prepared before parameters are bound.");
-      enforceEx!MYX(args.length == _psParams, "Param count supplied does not match prepared statement");
-      foreach (uint i, arg; args)
-      {
-         inParams[i] = arg;
-      }
-   }
-
-   ref MyVariant param(uint index)
-   {
+      enforceEx!MYX(index < _psParams, "Parameter index out of range.");
       return _inParams[index];
    }
 
+   /**
+    * Execute a one-off SQL command.
+    *
+    * Use this method when you are not going to be using the same command repeatedly.
+    * It can be used with commands that don't produce a result set, or those that do. If there is a result
+    * set its existence will be indicated by the return value.
+    *
+    * Any result set can be accessed vis getNextRow(), but you should really be using execSQLResult()
+    * or execSQLSequence() for such queries.
+    *
+    * Params: ra = An out parameter to receive the number of rows affected.
+    * Returns: true if there was a (possibly empty) result set.
+    */
    bool execSQL(out ulong ra)
    {
       _con.sendCmd(0x03, _sql);
@@ -2578,6 +3099,18 @@ public:
       return rv;
    }
 
+   /**
+    * Execute a one-off SQL command for the case where you expect a result set, and want it all at once.
+    *
+    * Use this method when you are not going to be using the same command repeatedly.
+    * This method will throw if the SQL command does not produce a result set.
+    *
+    * If there are long data items among the expected result columns you can specify that they are to be
+    * subject to chunked transfer via a delegate.
+    *
+    * Params: csa = An optional array of ColumnSpecialization structs.
+    * Returns: A (possibly empty) ResultSet.
+    */
    ResultSet execSQLResult(ColumnSpecialization[] csa = null)
    {
       uint alloc = 20;
@@ -2614,12 +3147,23 @@ public:
       return rs;
    }
 
+   /**
+    * Execute a one-off SQL command to place result values into a set of D variables.
+    *
+    * Use this method when you are not going to be using the same command repeatedly.
+    * It will throw if the specified command does not produce a result set, or if any column
+    * type is incompatible with the corresponding D variable
+    *
+    * Params: args = A tuple of D variables to receive the results.
+    * Returns: true if there was a (possibly empty) result set.
+    */
    void execSQLTuple(T...)(ref T args)
    {
       ulong ra;
       enforceEx!MYX(execSQL(ra), "The executed query did not produce a result set.");
       Row rr = getNextRow();
-      enforceEx!MYX(rr._valid, "The result set was empty.");
+      if (!rr._valid)   // The result set was empty - not a crime.
+         return;
       enforceEx!MYX(rr._uva.length == args.length, "Result column count does not match the target tuple.");
       foreach (uint i, dummy; args)
       {
@@ -2632,56 +3176,20 @@ public:
       // allow sloppy SQL that does not ensure just one row!
       purgeResult();
    }
-/+
-   bool execPrepared(out ulong ra)
-   {
-      enforceEx!MYX(_hStmt, "The statement has not been prepared.");
-      ubyte[] prefix = makePSPrefix(0);
-      uint len = prefix.length;
-      ubyte[] packet;
-      bool longData;
-      if (_psh._paramCount)
-      {
-         ubyte[] one = [ 1 ];
-         ubyte[] vals;
-         ubyte[] types = analyseParams(vals, longData);
-         ubyte[] nbm = makeBitmap(_psa);
-         packet = prefix ~ nbm ~ one ~ types ~ vals;
-      }
-      else
-         packet = prefix;
-      uint pl = packet.length - 4;
-      _con.resetPacket();
-      packet[0] = cast(ubyte) (pl & 0xff);
-      packet[1] = cast(ubyte) ((pl >> 8) & 0xff);
-      packet[2] = cast(ubyte) ((pl >> 16) & 0xff);
-      packet[3] = _con.pktNumber;
-      _con.bumpPacket();
-      _con.send(packet);
-      packet = _con.getPacket(pl);
-      ubyte* ubp = packet.ptr;
-      bool rv;
-      if (*ubp == 0 || *ubp == 255)
-      {
-         _con.resetPacket();
-         OKPacket okp = OKPacket(ubp, pl);
-         enforceEx!MYX(!okp.error, "MySQL Error: " ~ cast(string) okp.message);
-         ra = okp.affected;
-         _con._serverStatus = okp.serverStatus;
-         _insertID = okp.insertID;
-         rv = false;
-      }
-      else
-      {
-         // There was presumably a result set
-         _headersPending = _rowsPending = _pendingBinary = true;
-         bool gash;
-         _fieldCount = cast(ushort) parseLCB(ubp, gash);
-         rv = true;
-      }
-      return rv;
-   }
-+/
+
+   /**
+    * Execute a prepared command.
+    *
+    * Use this method when you will use the same SQL command repeatedly.
+    * It can be used with commands that don't produce a result set, or those that do. If there is a result
+    * set its existence will be indicated by the return value.
+    *
+    * Any result set can be accessed vis getNextRow(), but you should really be using execPreparedResult()
+    * or execPreparedSequence() for such queries.
+    *
+    * Params: ra = An out parameter to receive the number of rows affected.
+    * Returns: true if there was a (possibly empty) result set.
+    */
    bool execPrepared(out ulong ra)
    {
       if (!_hStmt)
@@ -2741,7 +3249,19 @@ public:
       return rv;
    }
 
-   ResultSet execPreparedResult()
+   /**
+    * Execute a prepared SQL command for the case where you expect a result set, and want it all at once.
+    *
+    * Use this method when you will use the same command repeatedly.
+    * This method will throw if the SQL command does not produce a result set.
+    *
+    * If there are long data items among the expected result columns you can specify that they are to be
+    * subject to chunked transfer via a delegate.
+    *
+    * Params: csa = An optional array of ColumnSpecialization structs.
+    * Returns: A (possibly empty) ResultSet.
+    */
+   ResultSet execPreparedResult(ColumnSpecialization[] csa = null)
    {
       ulong ra;
       enforceEx!MYX(execPrepared(ra), "The executed query did not produce a result set.");
@@ -2750,6 +3270,8 @@ public:
       rra.length = alloc;
       uint cr = 0;
       _rsh = ResultSetHeaders(_con, _fieldCount);
+      if (csa !is null)
+         _rsh.addSpecializations(csa);
       _headersPending = false;
       ubyte[] packet;
       for (uint i = 0;; i++)
@@ -2773,6 +3295,16 @@ public:
       return rs;
    }
 
+   /**
+    * Execute a prepared SQL command to place result values into a set of D variables.
+    *
+    * Use this method when you will use the same command repeatedly.
+    * It will throw if the specified command does not produce a result set, or if any column
+    * type is incompatible with the corresponding D variable
+    *
+    * Params: args = A tuple of D variables to receive the results.
+    * Returns: true if there was a (possibly empty) result set.
+    */
    void execPreparedTuple(T...)(ref T args)
    {
       ulong ra;
@@ -2792,6 +3324,20 @@ public:
       purgeResult();
    }
 
+   /**
+    * Get the next Row of a pending result set.
+    *
+    * This method can be used after either execSQL() or execPrepared() have returned true
+    * to retrieve result set rows sequentially.
+    *
+    * Similar functionality is available via execSQLSequence() and execPreparedSequence() in
+    * which case the interface is presented as a forward range of Rows.
+    *
+    * This method allows you to deal with very large result sets either a row at a time, or by
+    * feeding the rows into some suitable container such as a linked list.
+    *
+    * Returns: A Row object.
+    */
    Row getNextRow()
    {
       if (_headersPending)
@@ -2817,6 +3363,8 @@ public:
       return rr;
    }
 
+   /// After a command that inserted a row into a table with an auto-increment  ID
+   /// column, this method allows you to retrieve the last insert ID.
    @ property ulong lastInsertID() { return _insertID; }
 }
 
@@ -2828,16 +3376,14 @@ unittest
       string s;
       double d;
    }
-
    bool ok = true;
-   Connection c = new Connection("localhost", "user", "password", "mysqld");
-   c.open();
+   auto c = new Connection("localhost", "user", "password", "mysqld");
    scope(exit) c.close();
    try
    {
 
       ulong ra;
-      Command c1 = Command(c);
+      auto c1 = Command(c);
 
       c1.sql = "delete from basetest";
       c1.execSQL(ra);
@@ -2975,7 +3521,7 @@ unittest
 
       c1.sql = "insert into basetest (intcol, stringcol) values(?, ?)";
       c1.prepare();
-      MyVariant[] va;
+      Variant[] va;
       va.length = 2;
       va[0] = 42;
       va[1] = "The quick brown fox x";
@@ -2995,7 +3541,7 @@ unittest
 
       c1.sql = "select intcol, stringcol from basetest where bytecol=? limit 1";
       c1.prepare();
-      MyVariant[] va2;
+      Variant[] va2;
       va2.length = 1;
       va2[0] = cast(byte) -128;
       c1.bindParameters(va2);
@@ -3003,6 +3549,18 @@ unittest
       b = "";
       c1.execPreparedTuple(a, b);
       assert(a == 42 && b == "The quick brown fox");
+
+      c1.sql = "update basetest set intcol=? where bytecol=-128";
+      c1.prepare();
+      int referred = 555;
+      c1.bindParameter(referred, 0);
+      c1.execPrepared(ra);
+      referred = 666;
+      c1.execPrepared(ra);
+      c1.sql = "select intcol from basetest where bytecol = -128";
+      int referredBack;
+      c1.execSQLTuple(referredBack);
+      assert(referredBack == 666);
 
       c1.sql = "delete from tblob";
       c1.execSQL(ra);
@@ -3082,7 +3640,7 @@ unittest
          }
          return &dg;
       }
-/*
+
       c1.sql = "select * from tblob limit 1";
       rs = c1.execSQLResult();
       ubyte[] blob = rs[0][1].get!(ubyte[]);
@@ -3090,7 +3648,7 @@ unittest
       DateTime dt4 = rs[0][4].get!(DateTime);
       writefln("blob. lengths %d %d", blob.length, blob2.length);
       writeln(to!string(dt4));
-*/
+
 
       c1.sql = "select * from tblob limit 1";
       CSN[] csa = [ CSN(1, 0xfc, 100000, bar1(got1, verified1)), CSN(3, 0xfc, 100000, bar2(got2, verified2)) ];
@@ -3422,9 +3980,7 @@ public:
 
 unittest
 {
-   immutable string constr = "host=localhost;user=user;pwd=password;db=mysqld";
-   Connection c = new Connection("localhost", "user", "password", "mysqld");
-   c.open();
+   auto c = new Connection("localhost", "user", "password", "mysqld");
    scope(exit) c.close();
    MetaData md = MetaData(c);
    string[] dbList = md.databases();
