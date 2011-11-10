@@ -997,7 +997,7 @@ public:
       _fieldCount = fieldCount;
       _fieldDescriptions.length = _fieldCount;
       _fieldNames.length = _fieldCount;
-      for (int i = 0; i < _fieldCount; i++)
+      foreach (uint i; 0.._fieldCount)
       {
          packet = con.getPacket(pl);
          FieldDescription t = FieldDescription(packet);
@@ -1086,19 +1086,18 @@ public:
       _colDescriptions.length = cols;
       _paramDescriptions.length = params;
       ubyte[] packet;
-      int i = 0;
       // The order in which fields are sent is params first, followed by EOF, then cols followed by EOF
       // The parameter specs are useless - they are all the same. This observation is coroborated
       // by the fact that the C API does not have any information about parameter types either.
       // WireShark gives up on these records also.
-      for (; i < _paramCount; i++)
+      foreach (uint i; 0.._paramCount)
       {
          uint pl;
          _con.getPacket(pl);  // just eat them - they are not useful
       }
       if (_paramCount)
          enforceEx!MYX(getEOFPacket(), "Expected EOF packet in result header sequence");
-      for (i = 0; i < _colCount; i++)
+      foreach(uint i; 0.._colCount)
       {
          uint pl;
          packet = _con.getPacket(pl);
@@ -1241,21 +1240,21 @@ protected:
       // Request utf-8 as default charSet
       *p++ = 33;
       // There's a statutory block of zero bytes here - fill them in.
-      for (int i = 0; i < 23; i++)
+      foreach (int i; 0..23)
          *p++ = 0;
       // Add the user name as a null terminated string
-      for (int i = 0; i < _user.length; i++)
+      foreach (uint i; 0.._user.length)
          *p++ = _user[i];
       *p++ = 0;
       // Add our calculated authentication token as a length prefixed string. It is basically a
       // SHA1 hash, so we know how long is is.
       *p++ = 20;
-      for (int i = 0; i < 20; i++)
+      foreach (uint i; 0..20)
          *p++ = _token[i];
       // if the default database is being set, add this finally as a null terminated string.
       if (_db.length)
       {
-         for (int i = 0; i < _db.length; i++)
+         foreach (uint i; 0.._db.length)
             *p++ = _db[i];
          *p++ = 0;
       }
@@ -1300,7 +1299,7 @@ protected:
       p++;
       _sThread = getInt(p);
       _authBuf.length = 255;
-      for (int i = 0; i < 8; i++)
+      foreach (uint i; 0..8)
          _authBuf[i] = *p++;
       assert(*p == 0);
       p++;
@@ -1308,7 +1307,7 @@ protected:
       p++;             // this byte supposed to be scramble length, but is actually zero
       p += 10;       // skip 10 bytes of filler
       len = 8;
-      for (int i = 0; *p; i++, len++)
+      for (uint i = 0; *p; i++, len++)
          _authBuf[8+i] = *p++;
       _authBuf.length = len;
       assert(*p == 0);
@@ -1348,7 +1347,7 @@ protected:
       sha1.input(_authBuf.ptr, _authBuf.length);
       sha1.input(pass2.ptr, pass2.length);
       result = sha1.result();
-      for (int i = 0; i < 20; i++)
+      foreach (uint i; 0..20)
          result[i] = result[i] ^ pass1[i];
       return result;
    }
@@ -1358,7 +1357,7 @@ protected:
       uint filter = 1;
       uint sCaps = _sCaps;
       uint cCaps = 0;
-      for (int i = 0; i < 24; i++)
+      foreach (uint i; 0..24)
       {
          if (filter & _sCaps)    // can the server do this capability?
          {
@@ -1836,7 +1835,7 @@ public:
          p += bml;
       }
 
-      for (int i = 0; i < fc; i++)
+      foreach (int i; 0..fc)
       {
          FieldDescription fd = rh[i];
          bool isnull = false;
@@ -2235,10 +2234,10 @@ struct Column
 }
 
 /**
- * Random access range of Rows.
+ * A Random access range of Rows.
  *
  * This is the entity that is returned by the Command methods execSQLResult and
- * execSQLPrepared
+ * execPreparedResult
  *
  * MySQL result sets can be up to 2^^64 rows, and the 32 bit implementation of the
  * MySQL C API accomodates such potential massive result sets by storing the rows in
@@ -2261,7 +2260,7 @@ private:
       _rc = ra.length;
       _colNames = colNames;
       _rb.length = _ra.length;
-      for (int i = 0; i < _ra.length; i++)
+      foreach (int i; 0.._ra.length)
          _rb[i] = i;
       _cr = _rb[0];
    }
@@ -2355,7 +2354,7 @@ public:
    void revert()
    {
        _rb.length = _ra.length;
-      for (int i = 0; i < _ra.length; i++)
+      foreach (uint i; 0.._ra.length)
          _rb[i] = i;
   }
 
@@ -2378,14 +2377,107 @@ public:
        }
        return aa;
     }
+}
+
+/**
+ * An input range of Rows.
+ *
+ * This is the entity that is returned by the Command methods execSQLSequence and
+ * execPreparedSequence
+ *
+ * MySQL result sets can be up to 2^^64 rows. This interface allows for iteration through
+ * a result set of that size.
+ */
+struct ResultSequence
+{
+private:
+   Command* _cmd;
+   Row _cr;
+   string[] _colNames;
+   ulong _rc;
+   bool _empty;
+
+
+
+   this (Command* cmd, string[] colNames)
+   {
+      _cmd = cmd;
+      _colNames = colNames;
+      _cr = _cmd.getNextRow();
+      if (!_cr._valid)
+         _empty = true;
+      else
+         _rc++;
+   }
+
+   ~this()
+   {
+      close();
+   }
+
+public:
 
 
    /**
-    * Get the number of rows in the result set.
+    * Make the ResultSequence behave as an input range - empty
+    *
+    */
+   @property bool empty() { return _empty; }
+   /**
+    * Make the ResultSequence behave as an input range - front
+    *
+    * Gets the current row
+    */
+   @property Row front()
+   {
+      enforceEx!MYX(!_empty, "Attempted 'front' on exhausted result sequence.");
+       return _cr;
+   }
+   /**
+    * Make the ResultSequence behave as am input range - popFront()
+    *
+    * Progresses to the next row of the result set - that will then be 'front'
+    */
+   void popFront()
+   {
+      enforceEx!MYX(!_empty, "Attempted 'popFront' when no more rows available");
+      _cr = _cmd.getNextRow();
+      if (!_cr._valid)
+         _empty = true;
+   }
+
+   /**
+    * Get the current row as an associative array by column name
+    */
+    Column[string] asAA()
+    {
+       enforceEx!MYX(!_empty, "Attempted 'front' on exhausted result sequence.");
+       Column[string] aa;
+       foreach (uint i, string s; _colNames)
+       {
+          Column c;
+          c.val = _cr._uva[i];
+          c.isNull = _cr._nulls[i];
+          aa[s] = c;
+       }
+       return aa;
+    }
+
+   /**
+    * Explicitly clean up the MySQL resources and cancel pending results
+    *
+    */
+   void close()
+   {
+      _cmd.purgeResult();
+   }
+
+   /**
+    * Get the number of currently retrieved.
     *
     * Note that this is not neccessarlly the same as the length of the range.
     */
-    @property size_t rowCount() { return _rc; }
+    @property ulong rowCount() { return _rc; }
 }
 
 /**
@@ -2409,6 +2501,7 @@ private:
    PreparedStmtHeaders _psh;
    Variant[] _inParams;
    ParameterSpecialization[] _psa;
+   string _prevFunc;
 
    bool sendCmd(ubyte cmd)
    {
@@ -2488,7 +2581,7 @@ private:
          vals.length = alloc;
       }
 
-      for (int i = 0; i < pc; i++)
+      foreach (uint i; 0..pc)
       {
          if (_psa[i].chunkSize)
             longData= true;
@@ -2823,6 +2916,7 @@ public:
       string sql(string sql)
       {
          purgeResult();
+         releaseStatement();
          _con.resetPacket();
          return _sql = sql;
       }
@@ -2917,7 +3011,7 @@ public:
       {
          if (_headersPending)
          {
-            for (int i = 0;; i++)
+            for (uint i = 0;; i++)
             {
                uint pl;
                ubyte[] packet = _con.getPacket(pl);
@@ -3148,6 +3242,35 @@ c.param(1) = "The answer";
    }
 
    /**
+    * Execute a one-off SQL command for the case where you expect a result set, and want
+    * to deal with it a row at a time.
+    *
+    * Use this method when you are not going to be using the same command repeatedly.
+    * This method will throw if the SQL command does not produce a result set.
+    *
+    * If there are long data items among the expected result columns you can specify that they are to be
+    * subject to chunked transfer via a delegate.
+    *
+    * Params: csa = An optional array of ColumnSpecialization structs.
+    * Returns: A (possibly empty) ResultSequence.
+    */
+   ResultSequence execSQLSequence(ColumnSpecialization[] csa = null)
+   {
+      uint alloc = 20;
+      Row[] rra;
+      rra.length = alloc;
+      uint cr = 0;
+      ulong ra;
+      enforceEx!MYX(execSQL(ra), "The executed query did not produce a result set.");
+      _rsh = ResultSetHeaders(_con, _fieldCount);
+      if (csa !is null)
+         _rsh.addSpecializations(csa);
+
+      _headersPending = false;
+      return ResultSequence(&this, _rsh.fieldNames);
+   }
+
+   /**
     * Execute a one-off SQL command to place result values into a set of D variables.
     *
     * Use this method when you are not going to be using the same command repeatedly.
@@ -3296,6 +3419,34 @@ c.param(1) = "The answer";
    }
 
    /**
+    * Execute a prepared SQL command for the case where you expect a result set, and want
+    * to deal with it one row at a time.
+    *
+    * Use this method when you will use the same command repeatedly.
+    * This method will throw if the SQL command does not produce a result set.
+    *
+    * If there are long data items among the expected result columns you can specify that they are to be
+    * subject to chunked transfer via a delegate.
+    *
+    * Params: csa = An optional array of ColumnSpecialization structs.
+    * Returns: A (possibly empty) ResultSequence.
+    */
+   ResultSequence execPreparedSequence(ColumnSpecialization[] csa = null)
+   {
+      ulong ra;
+      enforceEx!MYX(execPrepared(ra), "The executed query did not produce a result set.");
+      uint alloc = 20;
+      Row[] rra;
+      rra.length = alloc;
+      uint cr = 0;
+      _rsh = ResultSetHeaders(_con, _fieldCount);
+      if (csa !is null)
+         _rsh.addSpecializations(csa);
+      _headersPending = false;
+      return ResultSequence(&this, _rsh.fieldNames);
+   }
+
+   /**
     * Execute a prepared SQL command to place result values into a set of D variables.
     *
     * Use this method when you will use the same command repeatedly.
@@ -3361,6 +3512,115 @@ c.param(1) = "The answer";
          rr = Row(_con, packet, _rsh, false);
       rr._valid = true;
       return rr;
+   }
+
+   /**
+    * Execute a stored function, with any required input variables, and store the return value into a D variable.
+    *
+    * For this method, no query string is to be provided. The required one is of the form "select foo(?, ? ...)".
+    * The method generates it and the appropriate bindings - in, and out. Chunked transfers are not supported
+    * in either direction. If you need them, create the parameters separately, then use execPreparedResult()
+    * to get a one-row, one-column result set.
+    *
+    * If it is not possible to convert the column value to the type of target, then execFunction will throw.
+    * If the result is NULL, that is indicated by a false return value, and target is unchanged.
+    *
+    * In the interest of performance, this method assumes that the user has the required information about
+    * the number and types of IN parameters and the type of the output variable. In the same interest, if the
+    * method is called repeatedly for the same stored function, prepare() is omitted after the first call.
+    *
+    * Params:
+    *    T = The type of the variable to receive the return result.
+    *    U = type tuple of arguments
+    *    name = The name of the stored function.
+    *    target = the D variable to receive the stored function return result.
+    *    args = The list of D variables to act as IN arguments to the stored function.
+    *
+    */
+   bool execFunction(T, U...)(string name, ref T target, U args)
+   {
+      bool repeatCall = (name == _prevFunc);
+      enforceEx!MYX(repeatCall || _hStmt == 0, "You must not prepare the statement before calling execFunction");
+      if (!repeatCall)
+      {
+         _sql = "select " ~ name ~ "(";
+         bool comma = false;
+         foreach (arg; args)
+         {
+            if (comma)
+               _sql ~= ",?";
+            else
+            {
+               _sql ~= "?";
+               comma = true;
+            }
+         }
+         _sql ~= ")";
+         prepare();
+         _prevFunc = name;
+      }
+      bindParameterTuple(args);
+      ulong ra;
+      enforceEx!MYX(execPrepared(ra), "The executed query did not produce a result set.");
+      Row rr = getNextRow();
+      enforceEx!MYX(rr._valid, "The result set was empty.");
+      enforceEx!MYX(rr._uva.length == 1, "Result was not a single column.");
+      enforceEx!MYX(typeid(target).toString() == rr._uva[0].type.toString(),
+                       "Target type and column type are not compatible.");
+      if (!rr.isNull(0))
+         target = rr._uva[0].get!(T);
+      // If there were more rows, flush them away
+      // Question: Should I check in purgeResult and throw if there were - it's very inefficient to
+      // allow sloppy SQL that does not ensure just one row!
+      purgeResult();
+      return !rr.isNull(0);
+   }
+
+   /**
+    * Execute a stored procedure, with any required input variables.
+    *
+    * For this method, no query string is to be provided. The required one is of the form "call proc(?, ? ...)".
+    * The method generates it and the appropriate in bindings. Chunked transfers are not supported.
+    * If you need them, create the parameters separately, then use execPrepared() or execPreparedResult().
+    *
+    * In the interest of performance, this method assumes that the user has the required information about
+    * the number and types of IN parameters. In the same interest, if the method is called repeatedly for the
+    * same stored function, prepare() and other redundant operations are omitted after the first call.
+    *
+    * OUT parameters are not currently supported. It should generally be possible with MySQL to present
+    * them as a result set.
+    *
+    * Params:
+    *    T = Type tuple
+    *    name = The name of the stored procedure.
+    *    args = Tuple of args
+    * Returns: True if the SP created a result set.
+    */
+   bool execProcedure(T...)(string name, ref T args)
+   {
+      bool repeatCall = (name == _prevFunc);
+      enforceEx!MYX(repeatCall || _hStmt == 0, "You must not prepare a statement before calling execProcedure");
+      if (!repeatCall)
+      {
+         _sql = "call " ~ name ~ "(";
+         bool comma = false;
+         foreach (arg; args)
+         {
+            if (comma)
+               _sql ~= ",?";
+            else
+            {
+               _sql ~= "?";
+               comma = true;
+            }
+         }
+         _sql ~= ")";
+         prepare();
+         _prevFunc = name;
+      }
+      bindParameterTuple(args);
+      ulong ra;
+      return execPrepared(ra);
    }
 
    /// After a command that inserted a row into a table with an auto-increment  ID
@@ -3526,7 +3786,7 @@ unittest
       va[0] = 42;
       va[1] = "The quick brown fox x";
       c1.bindParameters(va);
-      for (int i = 0; i < 20; i++)
+      foreach (int i; 0..20)
       {
          c1.execPrepared(ra);
          c1.param(0) += 1;
@@ -3562,6 +3822,26 @@ unittest
       c1.execSQLTuple(referredBack);
       assert(referredBack == 666);
 
+      // Test execFunction()
+      string g = "Gorgeous";
+      string reply;
+      c1.sql = "";
+      bool nonNull = c1.execFunction("hello", reply, g);
+      assert(nonNull && reply == "Hello Gorgeous!");
+      g = "Hotlips";
+      nonNull = c1.execFunction("hello", reply, g);
+      assert(nonNull && reply == "Hello Hotlips!");
+
+      // Test execProcedure()
+      g = "inserted string 1";
+      int m = 2001;
+      c1.sql = "";
+      c1.execProcedure("insert2", m, g);
+
+      c1.sql = "select stringcol from basetest where intcol=2001";
+      c1.execSQLTuple(reply);
+      assert(reply == g);
+
       c1.sql = "delete from tblob";
       c1.execSQL(ra);
       c1.sql = "insert into tblob values(321, NULL, 22.4, NULL, '2011-11-05 11:52:00')";
@@ -3574,7 +3854,7 @@ unittest
 
          void fill(ubyte[] a, uint m)
          {
-            for (uint i = 0; i < m; i++)
+            foreach (uint i; 0..m)
             {
                a[i] = cast(ubyte) (cp & 0xff);
                cp++;
@@ -3614,7 +3894,7 @@ unittest
 
          void dg(ubyte[] ba, bool finished)
          {
-            for (uint i = 0; i < ba.length; i++)
+            foreach (uint; 0..ba.length)
             {
                if (verified && ba[i] != ((got+i) & 0xff))
                   verified = false;
@@ -3631,7 +3911,7 @@ unittest
 
          void dg(ubyte[] ba, bool finished)
          {
-            for (uint i = 0; i < ba.length; i++)
+            foreach (uint i; 0..ba.length)
             {
                if (verified && ba[i] != ((got+i) & 0xff))
                   verified = false;
@@ -3757,11 +4037,11 @@ private:
       MySQLProcedure[] pa;
       uint n = _rs.length;
       pa.length = n;
-      for (uint i = 0; i < n; i++)
+      foreach (uint i; 0..n)
       {
          MySQLProcedure foo;
          Row r = _rs[i];
-         for (int j = 0; j < 11; j++)
+         foreach (int j; 0..11)
          {
             string t;
             bool isNull = r.isNull(j);
@@ -3834,7 +4114,7 @@ public:
       _mdc = Command(_con, "show databases");
       _rs = _mdc.execSQLResult();
       uint n = _rs.length;
-      for (uint i = 0; i < n; i++)
+      foreach (uint i; 0..n)
       {
          string s;
          Row r = _rs[i];
@@ -3855,7 +4135,7 @@ public:
       _mdc = Command(_con, "show tables");
       _rs = _mdc.execSQLResult();
       uint n = _rs.length;
-      for (uint i = 0; i < n; i++)
+      foreach (uint i; 0..n)
       {
          string s;
          Row r = _rs[i];
@@ -3880,7 +4160,7 @@ public:
       uint n = _rs.length;
       MySQLColumn[] ca;
       ca.length = n;
-      for (uint i = 0; i < n; i++)
+      foreach (uint i; 0..n)
       {
          MySQLColumn col;
          Row r = _rs[i];
